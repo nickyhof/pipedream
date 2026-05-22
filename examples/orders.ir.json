@@ -1,0 +1,35 @@
+{
+  "name": "monthly_completed_revenue",
+  "steps": [
+    {
+      "op": "load_csv",
+      "id": "orders",
+      "path": "examples/data/orders.csv",
+      "has_header": true
+    },
+    {
+      "op": "filter",
+      "id": "completed",
+      "input": "orders",
+      "predicate": "status == 'completed'"
+    },
+    {
+      "op": "aggregate",
+      "id": "monthly",
+      "input": "completed",
+      "group_by": ["month"],
+      "aggregations": [
+        { "column": "amount", "func": "sum", "output": "revenue" },
+        { "column": "", "func": "count", "output": "order_count" }
+      ]
+    },
+    {
+      "op": "sort",
+      "id": "ranked",
+      "input": "monthly",
+      "by": ["revenue"],
+      "descending": true
+    }
+  ],
+  "output": "ranked"
+}
