@@ -99,6 +99,24 @@ def reachable_ids(pipeline: Pipeline) -> set[str]:
     return keep
 
 
+def execution_order(pipeline: Pipeline) -> list[Step]:
+    """Return reachable steps in dependency order (inputs before dependents)."""
+    step_by_id = pipeline.step_map()
+    ordered: list[Step] = []
+    seen: set[str] = set()
+
+    def visit(sid: str) -> None:
+        if sid in seen:
+            return
+        for ref in step_inputs(step_by_id[sid]):
+            visit(ref)
+        seen.add(sid)
+        ordered.append(step_by_id[sid])
+
+    visit(pipeline.output_id())
+    return ordered
+
+
 def prune(pipeline: Pipeline) -> Pipeline:
     """Drop steps that don't feed the output (dead-step elimination)."""
     keep = reachable_ids(pipeline)

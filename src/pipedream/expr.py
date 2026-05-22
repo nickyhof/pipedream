@@ -104,6 +104,15 @@ class Expression:
     def evaluate(self, row: dict[str, Any]) -> Any:
         return _eval(self._tree, row)
 
+    @property
+    def tree(self) -> ast.AST:
+        """The validated AST root.
+
+        Exposed so alternative backends can lower an expression to their own
+        target language (e.g. SQL) instead of evaluating it row-wise.
+        """
+        return self._tree
+
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"Expression({self.source!r})"
 

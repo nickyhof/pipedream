@@ -11,7 +11,7 @@ pluggable runtime (in-memory pandas by default).
   orders.pipe                  Pipeline (IR)                result
  ┌────────────┐  frontend   ┌───────────────┐  passes   ┌──────────┐  executor
  │ plain      │ ──(Claude)─▶│ typed DAG of  │ ─────────▶│ validated│ ─────────▶ table
- │ English    │             │ steps         │  analyze  │ + pruned │  (pandas)
+ │ English    │             │ steps         │  analyze  │ + pruned │ (pandas/duckdb)
  └────────────┘             └───────────────┘           └──────────┘
                                    │                                   ▲
                                    └────── on-disk cache ──────────────┘
@@ -116,7 +116,7 @@ Sort the months from highest revenue to lowest.
 | IR | `ir.py` | A Pydantic model of a pipeline: a DAG of typed `Step`s (discriminated union on `op`) referencing each other by `id`. Executor-agnostic — describes *what*, not *how*. |
 | Middle-end | `passes.py` | Pure functions over the IR: reference resolution, duplicate-id and cycle detection, expression compilation, and dead-step elimination. |
 | Expressions | `expr.py` | A safe, AST-walking evaluator for filter predicates and derived columns. Allowlists node types and a fixed function set — never `eval`. |
-| Runtime | `runtime/` | An `Executor` ABC + registry. `PandasExecutor` is the default; it walks the DAG, memoizes shared steps, and evaluates row expressions through `expr.py`. |
+| Runtime | `runtime/` | An `Executor` ABC + registry with two built-in backends. `PandasExecutor` (default) walks the DAG in memory and evaluates row expressions through `expr.py`. `DuckDBExecutor` lowers the whole pipeline to SQL. |
 | Driver | `compiler.py` | Orchestrates the phases and caches compiled IR on disk, keyed by a hash of `(schema version, model, instruction prompt, source)`. |
 
 ### The IR
@@ -161,6 +161,22 @@ coalesce(discount, 0)
 ```
 
 ### Pluggable executors
+
+Two backends ship today, selected with `--executor` (or `get_executor(name)`):
+
+| Backend | How it runs the IR |
+| --- | --- |
+| `pandas` (default) | Walks the DAG in memory, memoizing shared upstream steps, and evaluates row expressions row-by-row via the safe evaluator. Good for a fast, dependency-light run. |
+| `duckdb` | **Lowers the IR to SQL**: each step becomes a temporary view defined in dependency order, and row expressions are translated from the same validated AST into SQL. Pushes work into DuckDB's engine. |
+
+Both produce identical results — the parity tests run the same pipeline through
+each and compare. That equivalence is the point of an executor-agnostic IR: the
+`duckdb` backend reuses the exact expression grammar the `pandas` backend does
+(`expr.py` exposes its parsed AST), translating it instead of evaluating it.
+
+```bash
+pipedream run examples/orders.ir.json --executor duckdb
+```
 
 Backends register themselves under a name and implement a single `run` method:
 
@@ -225,6 +241,7 @@ src/pipedream/
   runtime/
     executor.py         # Executor ABC + registry
     pandas_executor.py  # default in-memory backend
+    duckdb_executor.py  # SQL-lowering backend
 examples/
   orders.pipe           # natural-language source
   orders.ir.json        # pre-compiled IR (runs offline)

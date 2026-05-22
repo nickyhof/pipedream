@@ -22,7 +22,6 @@ from .ir import (
     Select,
     Sort,
     Step,
-    step_inputs,
 )
 from .llm import DEFAULT_MODEL
 from .runtime import available, get_executor
@@ -33,23 +32,6 @@ def _load_or_compile(path: str, model: str, use_cache: bool) -> Pipeline:
     if path.endswith(".json"):
         return passes.analyze(load_pipeline(path))
     return Compiler(model=model).compile_file(path, use_cache=use_cache)
-
-
-def _execution_order(pipeline: Pipeline) -> list[Step]:
-    step_by_id = pipeline.step_map()
-    ordered: list[Step] = []
-    seen: set[str] = set()
-
-    def visit(sid: str) -> None:
-        if sid in seen:
-            return
-        for ref in step_inputs(step_by_id[sid]):
-            visit(ref)
-        seen.add(sid)
-        ordered.append(step_by_id[sid])
-
-    visit(pipeline.output_id())
-    return ordered
 
 
 def _describe(step: Step) -> str:
@@ -82,7 +64,7 @@ def _describe(step: Step) -> str:
 
 def render_plan(pipeline: Pipeline) -> str:
     lines = [f"pipeline: {pipeline.name}"]
-    for i, step in enumerate(_execution_order(pipeline), start=1):
+    for i, step in enumerate(passes.execution_order(pipeline), start=1):
         marker = " *" if step.id == pipeline.output_id() else "  "
         lines.append(f"{marker}{i:>2}. {step.id}: {_describe(step)}")
     lines.append(f"output: {pipeline.output_id()}")
