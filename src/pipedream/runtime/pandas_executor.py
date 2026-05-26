@@ -9,6 +9,8 @@ expressions (filter predicates, derived columns) are evaluated through the safe
 from __future__ import annotations
 
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pandas as pd
@@ -17,6 +19,7 @@ from ..errors import ExecutionError, ExpressionError
 from ..expr import compile_expr
 from ..ir import (
     Aggregate,
+    Classify,
     Derive,
     Filter,
     Join,
@@ -30,11 +33,23 @@ from ..ir import (
     Step,
     step_inputs,
 )
+from ..templating import render
 from .executor import Executor, register
+from .model import RuntimeModel, get_model
 
 
 class PandasExecutor(Executor):
     name = "pandas"
+
+    def __init__(self, model: RuntimeModel | None = None) -> None:
+        # The runtime model is only resolved if a pipeline actually uses an LLM
+        # op, so pipelines without one never touch model config.
+        self._model = model
+
+    def _runtime_model(self) -> RuntimeModel:
+        if self._model is None:
+            self._model = get_model()
+        return self._model
 
     def run(self, pipeline: Pipeline) -> pd.DataFrame:
         cache: dict[str, pd.DataFrame] = {}
@@ -94,7 +109,27 @@ class PandasExecutor(Executor):
         if isinstance(step, Rename):
             mapping = {r.source: r.target for r in step.renames}
             return inputs[0].rename(columns=mapping)
+        if isinstance(step, Classify):
+            return self._classify(inputs[0], step)
         raise ExecutionError(f"no pandas implementation for op {step.op!r}")
+
+    def _classify(self, df: pd.DataFrame, step: Classify) -> pd.DataFrame:
+        model = self._runtime_model()
+        prompts = [render(step.template, row) for row in df.to_dict("records")]
+
+        def label_for(text: str) -> str:
+            return model.classify(text, step.labels)
+
+        workers = max(1, int(os.environ.get("PIPEDREAM_LLM_CONCURRENCY", "8")))
+        if workers == 1 or len(prompts) <= 1:
+            labels = [label_for(p) for p in prompts]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                labels = list(pool.map(label_for, prompts))
+
+        out = df.copy()
+        out[step.column] = pd.Series(labels, index=df.index)
+        return out
 
     @staticmethod
     def _filter(df: pd.DataFrame, step: Filter) -> pd.DataFrame:

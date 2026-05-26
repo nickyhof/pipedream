@@ -21,6 +21,7 @@ from ..errors import ExecutionError
 from ..expr import compile_expr
 from ..ir import (
     Aggregate,
+    Classify,
     Derive,
     Filter,
     Join,
@@ -135,6 +136,11 @@ class DuckDBExecutor(Executor):
                 f"{_ident(r.source)} AS {_ident(r.target)}" for r in step.renames
             )
             return f"SELECT * RENAME ({pairs}) FROM {_ident(step.input)}"
+        if isinstance(step, Classify):
+            raise ExecutionError(
+                f"step {step.id!r}: the 'classify' op cannot run on the duckdb "
+                "executor (it calls a Python model per row); use --executor pandas"
+            )
         raise ExecutionError(f"no duckdb implementation for op {step.op!r}")
 
     def _aggregate_sql(self, step: Aggregate) -> str:

@@ -11,6 +11,7 @@ from .compiler import Compiler, load_pipeline, save_pipeline
 from .errors import PipeDreamError
 from .ir import (
     Aggregate,
+    Classify,
     Derive,
     Filter,
     Join,
@@ -59,6 +60,8 @@ def _describe(step: Step) -> str:
     if isinstance(step, Rename):
         pairs = ", ".join(f"{r.source}->{r.target}" for r in step.renames)
         return f"rename in {step.input}: {pairs}"
+    if isinstance(step, Classify):
+        return f"classify {step.input} -> {step.column} in [{', '.join(step.labels)}] (LLM)"
     return step.op
 
 

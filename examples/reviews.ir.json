@@ -1,0 +1,12 @@
+{
+  "name": "review_sentiment",
+  "steps": [
+    {"op": "load_csv", "id": "reviews", "path": "examples/data/reviews.csv"},
+    {"op": "classify", "id": "labeled", "input": "reviews",
+     "template": "Customer review: {review}",
+     "labels": ["positive", "negative", "neutral"],
+     "column": "sentiment"},
+    {"op": "select", "id": "out", "input": "labeled", "columns": ["id", "review", "sentiment"]}
+  ],
+  "output": "out"
+}

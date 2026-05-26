@@ -44,7 +44,9 @@ Requires Python 3.11+.
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .            # add ".[dev]" for the test dependencies
+pip install -e .            # add ".[dev]" for tests
+                            # ".[serve]" for the local model server (FastAPI)
+                            # ".[local-model]" to load a Hugging Face model (torch)
 ```
 
 Compiling natural language requires an Anthropic API key:
@@ -119,6 +121,7 @@ Sort the months from highest revenue to lowest.
 | Expressions | `expr.py` | A safe, AST-walking evaluator for filter predicates and derived columns. Allowlists node types and a fixed function set — never `eval`. |
 | Runtime | `runtime/` | An `Executor` ABC + registry with two built-in backends. `PandasExecutor` (default) walks the DAG in memory and evaluates row expressions through `expr.py`. `DuckDBExecutor` lowers the whole pipeline to SQL. |
 | Driver | `compiler.py` | Orchestrates the phases and caches compiled IR on disk, keyed by a hash of `(schema version, model, instruction prompt, source)`. |
+| Runtime models | `runtime/model.py`, `serve.py` | The *local* model a pipeline calls during execution (for the `classify` op) — separate from the Anthropic compiler frontend. A pluggable `RuntimeModel` registry with an OpenAI-compatible client, plus a shipped local server. |
 
 ### The IR
 
@@ -138,6 +141,7 @@ order. Operations:
 | `sort` | `input`, `by`, `descending` |
 | `limit` | `input`, `count` |
 | `rename` | `input`, `renames` (`{source, target}`) |
+| `classify` | `input`, `template` (`{column}` placeholders), `labels`, `column` — labels each row with a runtime LLM |
 
 Aggregation functions: `sum`, `mean`, `min`, `max`, `count`, `median`, `std`,
 `first`, `last`, `nunique`. For a plain row count use `func="count"` with
@@ -254,6 +258,35 @@ from pipedream import load_pipeline
 df = get_executor("pandas").run(load_pipeline("examples/orders.ir.json"))
 ```
 
+### Runtime LLM ops and the local model server
+
+Two model uses, kept separate:
+
+- **Compile time** — the frontend turns natural language into IR using **Anthropic** (cloud). Unchanged.
+- **Run time** — the `classify` op calls a **local** model per row to label free text the IR couldn't classify deterministically (sentiment, topic, …). The pipeline's intent — the rendered template and the allowed `labels` — is sent in the prompt, so a stock instruct model behaves as a pipeline-aware classifier ("IR-awareness" comes from *what we send*, not a model trained on the IR).
+
+Runtime models are pluggable like executors (`runtime/model.py`). The default `OpenAIEndpointModel` speaks the OpenAI chat API, configured by env:
+
+```
+PIPEDREAM_LLM_BASE_URL   default http://localhost:8000/v1
+PIPEDREAM_LLM_MODEL      default "local"
+PIPEDREAM_LLM_API_KEY    optional
+PIPEDREAM_LLM_CONCURRENCY default 8   # per-row calls run concurrently
+```
+
+It works against any OpenAI-compatible server. PipeDream also **ships its own** (`pipedream.serve`): a small FastAPI app that loads a local Hugging Face model and exposes `/v1/chat/completions`. The heavy ML stack is an optional extra, imported lazily:
+
+```bash
+pip install -e ".[serve,local-model]"
+pipedream-serve --model Qwen/Qwen2.5-0.5B-Instruct --port 8000   # terminal 1
+
+export PIPEDREAM_LLM_BASE_URL=http://localhost:8000/v1
+export PIPEDREAM_LLM_MODEL=Qwen/Qwen2.5-0.5B-Instruct
+pipedream run examples/reviews.ir.json --executor pandas          # terminal 2
+```
+
+Only the `pandas` executor runs `classify` (it calls a Python model per row); the `duckdb` backend reports it as unsupported. The `classify` example (`examples/reviews.*`) needs a running model server; `pipedream explain examples/reviews.ir.json` works offline.
+
 ## Evaluation
 
 The compiler is judged by **behavior, not syntax**: cases live under
@@ -296,17 +329,21 @@ src/pipedream/
   passes.py             # validation + optimization
   schema.py             # name resolution + type inference (the type checker)
   llm.py                # Anthropic frontend (NL -> IR)
+  templating.py         # {column} templating for LLM ops
   compiler.py           # phase driver + on-disk cache
   cli.py                # compile / run / explain
   eval.py               # result-based eval harness (python -m pipedream.eval)
+  serve.py              # local OpenAI-compatible model server (pipedream-serve)
   runtime/
     executor.py         # Executor ABC + registry
     pandas_executor.py  # default in-memory backend
     duckdb_executor.py  # SQL-lowering backend
+    model.py            # RuntimeModel registry + OpenAI-compatible client
 examples/
   orders.pipe           # natural-language source
   orders.ir.json        # pre-compiled IR (runs offline)
-  data/orders.csv
+  reviews.ir.json       # classify example (needs a local model server)
+  data/
 evals/cases/            # eval fixtures (prompt, golden IR, data, expected)
 tests/
 ```

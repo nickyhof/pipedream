@@ -46,6 +46,11 @@ inner, left, right, outer.
 - sort(input, by, descending): order rows.
 - limit(input, count): keep the first N rows.
 - rename(input, renames): rename columns; each rename is {source, target}.
+- classify(input, template, labels, column): label each row with a runtime LLM. \
+The template is a per-row prompt with {column} placeholders (e.g. "Review: \
+{text}"), labels is the list of allowed outputs, and column names the new label \
+column. Use this only when the task needs a model to judge/categorize free text \
+(e.g. sentiment, topic) that no deterministic rule could express.
 
 Row expressions (used by filter and derive) reference columns by bare name and \
 support comparisons (== != < <= > >=), membership (in / not in), boolean \
