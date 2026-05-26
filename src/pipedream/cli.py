@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import passes, schema
+from . import passes, schema, table
 from .compiler import Compiler, load_pipeline, save_pipeline
 from .errors import PipeDreamError
 from .ir import (
@@ -108,12 +108,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     pipeline = _load_or_compile(args.input, args.model, not args.no_cache)
     result = get_executor().run(pipeline)
     if args.limit is not None:
-        result = result.head(args.limit)
+        result = table.head(result, args.limit)
     if args.out:
-        result.to_csv(args.out, index=False)
-        print(f"wrote {len(result)} rows -> {args.out}")
+        table.write_csv(result, args.out)
+        print(f"wrote {result.num_rows} rows -> {args.out}")
     else:
-        print(result.to_string(index=False))
+        print(table.render(result))
     return 0
 
 

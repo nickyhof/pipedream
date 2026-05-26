@@ -6,17 +6,25 @@ selected from the final view. Row expressions are translated from the safe
 expression AST into SQL expressions rather than evaluated.
 
 Deterministic ops run as SQL. The one model-driven op, ``classify``, runs as a
-DuckDB Python scalar UDF: a per-step function (bound to that step's labels and
-the runtime model) is registered on the connection and called per row. The model
+DuckDB *vectorized* (Arrow) Python UDF: a per-step function (bound to that step's
+labels and the runtime model) is registered on the connection and called with a
+chunk of rows at a time, fanning the model calls across a thread pool. The model
 is only resolved if a pipeline actually contains a ``classify`` step.
+
+Results are returned as :class:`pyarrow.Table` — DuckDB is Arrow-native, so there
+is no pandas dependency.
 """
 
 from __future__ import annotations
 
 import ast
 import json
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+
+import pyarrow as pa
 
 from ..errors import ExecutionError
 from ..expr import compile_expr
@@ -91,10 +99,10 @@ class DuckDBExecutor(Executor):
                     ) from exc
             result = con.execute(
                 f"SELECT * FROM {_ident(pipeline.output_id())}"
-            ).fetchdf()
+            ).to_arrow_table()
         finally:
             con.close()
-        return result.reset_index(drop=True)
+        return result
 
     def _step_sql(self, step: Step, con: Any) -> str:
         if isinstance(step, LoadCsv):
@@ -103,12 +111,9 @@ class DuckDBExecutor(Executor):
                 f"SELECT * FROM read_csv_auto({_str_lit(step.path)}, header={header})"
             )
         if isinstance(step, LoadInline):
-            import pandas as pd
-
             records = json.loads(step.data_json)
-            df = pd.DataFrame.from_records(records)
             reg = f"_inline_{step.id}"
-            con.register(reg, df)
+            con.register(reg, pa.Table.from_pylist(records))
             return f"SELECT * FROM {_ident(reg)}"
         if isinstance(step, Select):
             cols = ", ".join(_ident(c) for c in step.columns)
@@ -156,14 +161,27 @@ class DuckDBExecutor(Executor):
         labels = list(step.labels)
         template = step.template
         cols = placeholders(template)
+        workers = max(1, int(os.environ.get("PIPEDREAM_LLM_CONCURRENCY", "8")))
 
-        def udf(*values: Any) -> str:
-            row = {c: ("" if v is None else v) for c, v in zip(cols, values)}
-            return model.classify(render(template, row), labels)
+        # Vectorized (Arrow) UDF: DuckDB hands us a chunk of rows per call, so we
+        # render every row's prompt and fan the model calls across a thread pool,
+        # then return the labels as an Arrow array aligned to the inputs.
+        def udf(*arrays: Any) -> pa.Array:
+            columns = [a.to_pylist() for a in arrays]
+            texts = [
+                render(template, {c: ("" if v is None else v) for c, v in zip(cols, vals)})
+                for vals in zip(*columns)
+            ]
+            if workers == 1 or len(texts) <= 1:
+                out = [model.classify(t, labels) for t in texts]
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    out = list(pool.map(lambda t: model.classify(t, labels), texts))
+            return pa.array(out, type=pa.string())
 
         fn = "pd_classify_" + re.sub(r"\W", "_", step.id)
         n = max(1, len(cols))
-        con.create_function(fn, udf, ["VARCHAR"] * n, "VARCHAR")
+        con.create_function(fn, udf, ["VARCHAR"] * n, "VARCHAR", type="arrow")
 
         if cols:
             call = ", ".join(f"CAST({_ident(c)} AS VARCHAR)" for c in cols)

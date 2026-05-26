@@ -47,15 +47,40 @@ def _pipeline():
 
 def test_classify_adds_label_column():
     stub = StubModel()
-    df = (
-        DuckDBExecutor(model=stub)
-        .run(passes.analyze(_pipeline()))
-        .sort_values("id")
-        .reset_index(drop=True)
+    rows = sorted(
+        DuckDBExecutor(model=stub).run(passes.analyze(_pipeline())).to_pylist(),
+        key=lambda r: r["id"],
     )
-    assert list(df["sentiment"]) == ["positive", "negative"]
+    assert [r["sentiment"] for r in rows] == ["positive", "negative"]
     # Template is rendered per row before the model is called.
     assert "Review: loved it, fantastic" in stub.calls
+
+
+def test_classify_vectorized_preserves_alignment():
+    # The Arrow UDF processes a chunk of rows at once; labels must stay aligned
+    # to their input rows.
+    texts = ["loved it", "awful", "loved this", "bad", "loved", "nope"]
+    data = json.dumps([{"id": i, "text": t} for i, t in enumerate(texts)])
+    p = Pipeline(
+        name="t",
+        steps=[
+            LoadInline(id="src", data_json=data),
+            Classify(
+                id="c",
+                input="src",
+                template="{text}",
+                labels=["positive", "negative"],
+                column="s",
+            ),
+        ],
+        output="c",
+    )
+    rows = sorted(
+        DuckDBExecutor(model=StubModel()).run(passes.analyze(p)).to_pylist(),
+        key=lambda r: r["id"],
+    )
+    expected = ["positive" if "loved" in t else "negative" for t in texts]
+    assert [r["s"] for r in rows] == expected
 
 
 def test_classify_schema_adds_str_column():
@@ -113,8 +138,8 @@ def test_classify_composes_with_sql():
         ],
         output="pos",
     )
-    df = DuckDBExecutor(model=StubModel()).run(passes.analyze(p))
-    assert list(df["id"]) == [1]
+    t = DuckDBExecutor(model=StubModel()).run(passes.analyze(p))
+    assert t.column("id").to_pylist() == [1]
 
 
 def test_match_label():

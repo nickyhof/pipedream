@@ -4,8 +4,8 @@ A compiled pipeline is a directed acyclic graph of typed steps. Each step has a
 unique ``id`` and an ``op`` discriminator; steps reference the output of earlier
 steps by id. The IR is deliberately executor-agnostic: it describes *what*
 transformation to apply, never *how* a particular engine should run it. That
-separation is what lets the same IR run on the in-memory pandas executor today
-and on a warehouse/Spark executor later.
+separation is what lets the same IR run on DuckDB today and on a warehouse/Spark
+executor later.
 
 The IR is also the compiler's contract with the model. The JSON schema derived
 from these models is what the LLM frontend is constrained to emit, so the field

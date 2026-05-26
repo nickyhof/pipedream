@@ -207,9 +207,12 @@ The runtime **lowers the IR to SQL** and runs it on DuckDB. Each step becomes a
 temporary view defined in dependency order, and row expressions are translated
 from the same validated AST (`expr.py`) into SQL rather than evaluated in Python.
 Deterministic ops (filter/derive/aggregate/join/...) are pure SQL; the one
-model-driven op, `classify`, runs as a DuckDB Python scalar UDF (see below).
-Results are returned as pandas DataFrames (DuckDB materializes them via `.df()`),
-which the CLI, eval harness, and library callers consume.
+model-driven op, `classify`, runs as a vectorized DuckDB Python UDF (see below).
+Results are returned as **Arrow tables** (`pyarrow.Table`) — DuckDB is
+Arrow-native (zero-copy, and more type-faithful than the pandas path), so Arrow
+is the single in-memory representation end to end, with no pandas dependency.
+The CLI, eval harness, and library callers consume Arrow directly (`table.py`
+holds the few presentation/IO helpers).
 
 The executor sits behind a registry, so another backend (a SQL warehouse, Spark)
 can be added without touching the compiler or the IR — it only implements `run`,
@@ -239,11 +242,12 @@ alongside the IR. Use `--no-cache` to force recompilation.
 from pipedream import Compiler, get_executor
 
 pipeline = Compiler().compile_file("examples/orders.pipe")  # needs ANTHROPIC_API_KEY
-df = get_executor().run(pipeline)
+table = get_executor().run(pipeline)        # a pyarrow.Table
 
 # Or load a pre-compiled IR — no key required:
 from pipedream import load_pipeline
-df = get_executor().run(load_pipeline("examples/orders.ir.json"))
+table = get_executor().run(load_pipeline("examples/orders.ir.json"))
+rows = table.to_pylist()                    # -> list[dict]
 ```
 
 ### Runtime LLM ops and the local model server
@@ -272,12 +276,13 @@ export PIPEDREAM_LLM_MODEL=Qwen/Qwen2.5-0.5B-Instruct
 pipedream run examples/reviews.ir.json                            # terminal 2
 ```
 
-`classify` runs inside DuckDB as a Python scalar UDF — a per-step function bound
-to that step's labels and the runtime model, called per row — so its output is
-just another view that downstream SQL steps consume. (Per-row calls are
-sequential today; a vectorized UDF could batch them.) The `classify` example
-(`examples/reviews.*`) needs a running model server; `pipedream explain
-examples/reviews.ir.json` works offline.
+`classify` runs inside DuckDB as a **vectorized (Arrow) Python UDF** — a per-step
+function bound to that step's labels and the runtime model. DuckDB hands it a
+chunk of rows at a time, and it fans the model calls across a thread pool
+(`PIPEDREAM_LLM_CONCURRENCY`, default 8) and returns the labels as an Arrow array,
+so its output is just another view that downstream SQL steps consume. The
+`classify` example (`examples/reviews.*`) needs a running model server;
+`pipedream explain examples/reviews.ir.json` works offline.
 
 ## Evaluation
 
@@ -326,6 +331,7 @@ src/pipedream/
   templating.py         # {column} templating for LLM ops
   compiler.py           # phase driver + on-disk cache
   cli.py                # compile / run / explain
+  table.py              # Arrow table helpers (render / CSV IO) — the result type
   eval.py               # result-based eval harness (python -m pipedream.eval)
   serve.py              # local OpenAI-compatible model server (pipedream-serve)
   runtime/

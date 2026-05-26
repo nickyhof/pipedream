@@ -17,9 +17,10 @@ column name to value. The grammar supports:
 * comparisons ``== != < <= > >=`` and membership ``in`` / ``not in``
 * a fixed set of helper functions (see ``_FUNCTIONS``)
 
-The same grammar is engine-agnostic in spirit: the pandas executor evaluates it
-row-wise here, while a future SQL executor would translate the AST to a WHERE/
-SELECT expression. Keeping it tiny is what makes that translation tractable.
+The same grammar is engine-agnostic in spirit: this module exposes the validated
+AST, and the DuckDB executor translates it to a SQL WHERE/SELECT expression
+rather than evaluating it. Keeping it tiny is what makes that translation
+tractable.
 """
 
 from __future__ import annotations

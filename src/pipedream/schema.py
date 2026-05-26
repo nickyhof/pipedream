@@ -111,17 +111,24 @@ class FileSchemaProvider:
         if not step.has_header:
             return Schema.unknown()
         try:
-            import pandas as pd
+            import pyarrow.csv as pacsv
 
-            sample = pd.read_csv(step.path, nrows=200)
+            arrow_schema = pacsv.open_csv(step.path).schema
         except Exception:  # noqa: BLE001 - missing/unreadable file -> relax
             return Schema.unknown()
-        return Schema.of([(str(c), _pandas_dtype(sample[c].dtype)) for c in sample.columns])
+        return Schema.of([(f.name, _arrow_dtype(f.type)) for f in arrow_schema])
 
 
-def _pandas_dtype(dtype: Any) -> DType:
-    kind = getattr(dtype, "kind", "O")
-    return {"i": INT, "u": INT, "f": FLOAT, "b": BOOL}.get(kind, STR)
+def _arrow_dtype(dtype: Any) -> DType:
+    import pyarrow as pa
+
+    if pa.types.is_integer(dtype):
+        return INT
+    if pa.types.is_floating(dtype):
+        return FLOAT
+    if pa.types.is_boolean(dtype):
+        return BOOL
+    return STR
 
 
 # ---------------------------------------------------------------------------
