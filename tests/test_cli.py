@@ -32,10 +32,3 @@ def test_run_missing_file_reports_error(capsys):
     err = capsys.readouterr().err
     assert rc == 1
     assert "error:" in err
-
-
-def test_run_unknown_executor(capsys):
-    rc = cli.main(["run", "examples/orders.ir.json", "--executor", "nope"])
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "unknown executor" in err

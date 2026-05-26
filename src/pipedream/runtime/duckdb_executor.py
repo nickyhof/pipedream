@@ -1,20 +1,21 @@
-"""DuckDB executor: lowers the IR to SQL.
+"""DuckDB executor: the single execution engine.
 
-Unlike the pandas backend (which evaluates each step row-wise in Python), this
-executor compiles the pipeline down to SQL. Each step becomes a temporary view
+Compiles a validated pipeline down to SQL. Each step becomes a temporary view
 named by its step id, defined in dependency order; the pipeline output is then
 selected from the final view. Row expressions are translated from the safe
 expression AST into SQL expressions rather than evaluated.
 
-This is the same IR running on a fundamentally different engine — the payoff of
-keeping the IR executor-agnostic. duckdb is imported lazily so the package still
-works (with the pandas backend) if it isn't installed.
+Deterministic ops run as SQL. The one model-driven op, ``classify``, runs as a
+DuckDB Python scalar UDF: a per-step function (bound to that step's labels and
+the runtime model) is registered on the connection and called per row. The model
+is only resolved if a pipeline actually contains a ``classify`` step.
 """
 
 from __future__ import annotations
 
 import ast
 import json
+import re
 from typing import Any
 
 from ..errors import ExecutionError
@@ -35,7 +36,9 @@ from ..ir import (
     Step,
 )
 from ..passes import execution_order
+from ..templating import placeholders, render
 from .executor import Executor, register
+from .model import RuntimeModel, get_model
 
 # IR aggregation function -> SQL. Functions not listed here are emitted verbatim.
 _AGG_SQL = {"mean": "avg", "std": "stddev_samp"}
@@ -59,6 +62,14 @@ def _str_lit(value: str) -> str:
 
 class DuckDBExecutor(Executor):
     name = "duckdb"
+
+    def __init__(self, model: RuntimeModel | None = None) -> None:
+        self._model = model
+
+    def _runtime_model(self) -> RuntimeModel:
+        if self._model is None:
+            self._model = get_model()
+        return self._model
 
     def run(self, pipeline: Pipeline) -> Any:
         try:
@@ -137,11 +148,33 @@ class DuckDBExecutor(Executor):
             )
             return f"SELECT * RENAME ({pairs}) FROM {_ident(step.input)}"
         if isinstance(step, Classify):
-            raise ExecutionError(
-                f"step {step.id!r}: the 'classify' op cannot run on the duckdb "
-                "executor (it calls a Python model per row); use --executor pandas"
-            )
+            return self._classify_sql(step, con)
         raise ExecutionError(f"no duckdb implementation for op {step.op!r}")
+
+    def _classify_sql(self, step: Classify, con: Any) -> str:
+        model = self._runtime_model()
+        labels = list(step.labels)
+        template = step.template
+        cols = placeholders(template)
+
+        def udf(*values: Any) -> str:
+            row = {c: ("" if v is None else v) for c, v in zip(cols, values)}
+            return model.classify(render(template, row), labels)
+
+        fn = "pd_classify_" + re.sub(r"\W", "_", step.id)
+        n = max(1, len(cols))
+        con.create_function(fn, udf, ["VARCHAR"] * n, "VARCHAR")
+
+        if cols:
+            call = ", ".join(f"CAST({_ident(c)} AS VARCHAR)" for c in cols)
+        else:
+            call = "CAST('' AS VARCHAR)"  # constant template: UDF ignores the arg
+        existing = _columns(con, step.input)
+        keep = f" EXCLUDE ({_ident(step.column)})" if step.column in existing else ""
+        return (
+            f"SELECT *{keep}, {fn}({call}) AS {_ident(step.column)} "
+            f"FROM {_ident(step.input)}"
+        )
 
     def _aggregate_sql(self, step: Aggregate) -> str:
         projections: list[str] = [_ident(c) for c in step.group_by]

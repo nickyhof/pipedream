@@ -30,16 +30,6 @@ def duck(pipeline):
     return get_executor("duckdb").run(passes.analyze(pipeline))
 
 
-def _norm(df):
-    """Order-insensitive, rounding-tolerant view of a result for comparison."""
-    rows = []
-    for rec in df.to_dict("records"):
-        rows.append(
-            tuple(round(v, 6) if isinstance(v, float) else v for v in rec.values())
-        )
-    return sorted(rows, key=lambda r: tuple(str(x) for x in r))
-
-
 def test_filter_select_sort_limit():
     p = Pipeline(
         name="t",
@@ -162,37 +152,3 @@ def test_example_ir_end_to_end():
     assert list(df["month"]) == ["2026-02", "2026-03", "2026-01"]
     assert list(df["order_count"]) == [3, 3, 2]
     assert df.loc[0, "revenue"] == 495.25
-
-
-def test_parity_with_pandas_on_example():
-    pipeline = passes.analyze(load_pipeline("examples/orders.ir.json"))
-    pandas_df = get_executor("pandas").run(pipeline)
-    duck_df = get_executor("duckdb").run(pipeline)
-    # Sort is deterministic here, so compare row-for-row after column align.
-    assert list(pandas_df.columns) == list(duck_df.columns)
-    assert _norm(pandas_df) == _norm(duck_df)
-
-
-def test_parity_with_pandas_on_aggregation():
-    pipeline = Pipeline(
-        name="parity",
-        steps=[
-            LoadInline(id="src", data_json=ORDERS),
-            Filter(id="done", input="src", predicate="status == 'completed'"),
-            Aggregate(
-                id="agg",
-                input="done",
-                group_by=["month"],
-                aggregations=[
-                    Aggregation(column="amount", func="sum", output="revenue"),
-                    Aggregation(column="amount", func="mean", output="avg_amount"),
-                    Aggregation(column="", func="count", output="n"),
-                ],
-            ),
-        ],
-        output="agg",
-    )
-    analyzed = passes.analyze(pipeline)
-    assert _norm(get_executor("pandas").run(analyzed)) == _norm(
-        get_executor("duckdb").run(analyzed)
-    )

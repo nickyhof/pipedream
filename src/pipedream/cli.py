@@ -25,7 +25,7 @@ from .ir import (
     Step,
 )
 from .llm import DEFAULT_MODEL
-from .runtime import available, get_executor
+from .runtime import get_executor
 
 
 def _load_or_compile(path: str, model: str, use_cache: bool) -> Pipeline:
@@ -106,8 +106,7 @@ def cmd_explain(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     pipeline = _load_or_compile(args.input, args.model, not args.no_cache)
-    executor = get_executor(args.executor)
-    result = executor.run(pipeline)
+    result = get_executor().run(pipeline)
     if args.limit is not None:
         result = result.head(args.limit)
     if args.out:
@@ -145,11 +144,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="Execute a pipeline and print the result.")
     p_run.add_argument("input", help="A .pipe source file or a .json IR file.")
-    p_run.add_argument(
-        "--executor",
-        default="pandas",
-        help=f"Runtime backend (available: {', '.join(available())}).",
-    )
     p_run.add_argument("--limit", type=int, help="Only print the first N rows.")
     p_run.add_argument("-o", "--out", help="Write the result to this CSV path.")
     p_run.add_argument("--no-cache", action="store_true")
@@ -170,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: file not found: {exc.filename}", file=sys.stderr)
         return 1
     except KeyError as exc:
-        # e.g. an unknown executor name from the registry.
+        # e.g. a missing key from one of the registries.
         print(f"error: {exc.args[0] if exc.args else exc}", file=sys.stderr)
         return 1
 

@@ -3,11 +3,10 @@ import json
 import pytest
 
 from pipedream import passes
-from pipedream.errors import CompileError, ExecutionError
-from pipedream.ir import Classify, LoadInline, Pipeline
-from pipedream.runtime import get_executor
+from pipedream.errors import CompileError
+from pipedream.ir import Classify, Filter, LoadInline, Pipeline
+from pipedream.runtime.duckdb_executor import DuckDBExecutor
 from pipedream.runtime.model import build_classify_messages, match_label
-from pipedream.runtime.pandas_executor import PandasExecutor
 from pipedream.schema import STR, infer_schemas
 
 REVIEWS = json.dumps(
@@ -48,7 +47,12 @@ def _pipeline():
 
 def test_classify_adds_label_column():
     stub = StubModel()
-    df = PandasExecutor(model=stub).run(passes.analyze(_pipeline()))
+    df = (
+        DuckDBExecutor(model=stub)
+        .run(passes.analyze(_pipeline()))
+        .sort_values("id")
+        .reset_index(drop=True)
+    )
     assert list(df["sentiment"]) == ["positive", "negative"]
     # Template is rendered per row before the model is called.
     assert "Review: loved it, fantastic" in stub.calls
@@ -92,9 +96,25 @@ def test_classify_requires_labels():
         passes.analyze(p)
 
 
-def test_classify_unsupported_on_duckdb():
-    with pytest.raises(ExecutionError, match="classify"):
-        get_executor("duckdb").run(passes.analyze(_pipeline()))
+def test_classify_composes_with_sql():
+    # The classify UDF produces a view that downstream SQL steps consume.
+    p = Pipeline(
+        name="t",
+        steps=[
+            LoadInline(id="src", data_json=REVIEWS),
+            Classify(
+                id="c",
+                input="src",
+                template="Review: {text}",
+                labels=["positive", "negative"],
+                column="sentiment",
+            ),
+            Filter(id="pos", input="c", predicate="sentiment == 'positive'"),
+        ],
+        output="pos",
+    )
+    df = DuckDBExecutor(model=StubModel()).run(passes.analyze(p))
+    assert list(df["id"]) == [1]
 
 
 def test_match_label():

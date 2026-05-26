@@ -1,5 +1,5 @@
 {
   "description": "Completed-order revenue per region, joining orders to a region lookup.",
   "ordered": true,
-  "executor": "pandas"
+  "executor": "duckdb"
 }

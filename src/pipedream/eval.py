@@ -82,7 +82,7 @@ def load_cases(root: str | Path = DEFAULT_CASES_DIR) -> list[Case]:
                 path=case_dir,
                 description=manifest.get("description", ""),
                 ordered=bool(manifest.get("ordered", False)),
-                executor=manifest.get("executor", "pandas"),
+                executor=manifest.get("executor", "duckdb"),
             )
         )
     return cases
