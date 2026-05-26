@@ -1,0 +1,11 @@
+order_id,customer,status,month,amount
+1001,alice,completed,2026-01,120.50
+1002,bob,completed,2026-01,80.00
+1003,alice,cancelled,2026-01,200.00
+1004,carol,completed,2026-02,300.25
+1005,bob,completed,2026-02,45.00
+1006,alice,completed,2026-02,150.00
+1007,carol,pending,2026-03,500.00
+1008,bob,completed,2026-03,99.99
+1009,alice,completed,2026-03,210.00
+1010,carol,completed,2026-03,75.00

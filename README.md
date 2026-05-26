@@ -115,6 +115,7 @@ Sort the months from highest revenue to lowest.
 | Frontend | `llm.py` | NL → IR via Claude. Structured outputs constrain the response to the `Pipeline` schema; adaptive thinking is on; the stable schema/instruction prompt is prompt-cached. Hidden behind a `Frontend` protocol so tests inject a stub. |
 | IR | `ir.py` | A Pydantic model of a pipeline: a DAG of typed `Step`s (discriminated union on `op`) referencing each other by `id`. Executor-agnostic — describes *what*, not *how*. |
 | Middle-end | `passes.py` | Pure functions over the IR: reference resolution, duplicate-id and cycle detection, expression compilation, and dead-step elimination. |
+| Schema analysis | `schema.py` | The type checker. Propagates a column schema (names + coarse dtypes) through the DAG and rejects unknown columns, bad/colliding join keys, and non-numeric aggregations at compile time. Sources resolve via a `SchemaProvider` (default reads CSV headers and inline JSON); unresolved sources relax downstream checks. |
 | Expressions | `expr.py` | A safe, AST-walking evaluator for filter predicates and derived columns. Allowlists node types and a fixed function set — never `eval`. |
 | Runtime | `runtime/` | An `Executor` ABC + registry with two built-in backends. `PandasExecutor` (default) walks the DAG in memory and evaluates row expressions through `expr.py`. `DuckDBExecutor` lowers the whole pipeline to SQL. |
 | Driver | `compiler.py` | Orchestrates the phases and caches compiled IR on disk, keyed by a hash of `(schema version, model, instruction prompt, source)`. |
@@ -159,6 +160,42 @@ produced by the model — cannot run arbitrary code.
 status == 'completed' and amount > 100
 coalesce(discount, 0)
 ```
+
+### Schema analysis
+
+After the structural passes, `schema.py` propagates a column **schema** through
+the DAG and type-checks it. A schema is an ordered set of typed columns; a
+`SchemaProvider` resolves *source* columns (the default reads CSV headers and
+sniffs dtypes from disk, and infers `load_inline` schemas from the JSON). Each
+op has a rule that both validates and produces the next schema — `select` must
+project columns that exist, `filter`/`derive` expressions may only reference
+existing columns, `join` keys must be present on both sides (and non-key
+collisions are rejected), and numeric aggregations require a numeric column.
+
+Errors become precise `CompileError`s, e.g.:
+
+```
+step 'proj' (select) references unknown column 'custmer'; available: order_id, customer, status, month, amount
+```
+
+If a source can't be resolved (its file isn't present at compile time) its
+schema is *unknown* and checks downstream of it relax, so `compile` and
+`explain` stay usable without the data on hand. `explain` prints the inferred
+output schema when it's known:
+
+```
+$ pipedream explain examples/orders.ir.json
+...
+output: ranked
+schema: month:str, revenue:float, order_count:int
+```
+
+Type checking is intentionally conservative — dtypes are inferred and carried
+(so they can be shown and reused), but the only hard type rule is the numeric
+aggregation one; expression-internal mismatches are inferred without being
+rejected, to avoid false positives that would block valid pipelines. Names +
+types here lay the groundwork for a future compile-and-repair loop (feed these
+errors back to the model to fix).
 
 ### Pluggable executors
 
@@ -217,6 +254,27 @@ from pipedream import load_pipeline
 df = get_executor("pandas").run(load_pipeline("examples/orders.ir.json"))
 ```
 
+## Evaluation
+
+The compiler is judged by **behavior, not syntax**: cases live under
+`evals/cases/<name>/` as self-contained dirs (`prompt.pipe`, `golden.ir.json`,
+`data/`, `expected.csv`, and a small `case.json`), and a pipeline's output table
+is compared to the golden `expected.csv`. Two modes:
+
+```bash
+python -m pipedream.eval          # offline: replay golden IRs, no API key
+python -m pipedream.eval --live   # compile prompts via the model, score NL->IR
+```
+
+- **offline** (default) replays the committed `golden.ir.json` for each case —
+  regression coverage for the runtime and golden IRs, with no model. The pytest
+  suite drives this, so the cases double as integration tests.
+- **live** compiles `prompt.pipe` through the model and scores the result. It
+  measures NL->IR accuracy and is skipped when `ANTHROPIC_API_KEY` is unset.
+
+Comparison is order-insensitive unless a case sets `"ordered": true` (i.e. the
+pipeline itself sorts), and tolerant of float rounding.
+
 ## Testing
 
 ```bash
@@ -225,8 +283,9 @@ pytest
 ```
 
 The suite covers the expression evaluator (including rejection of unsafe
-constructs), the analysis passes, every executor op, compiler caching (via a
-stub frontend, so no network), and the CLI — all offline.
+constructs), the analysis and schema passes, every executor op (pandas and
+duckdb, with parity checks), compiler caching (via a stub frontend, so no
+network), the CLI, and the eval cases — all offline.
 
 ## Project layout
 
@@ -235,9 +294,11 @@ src/pipedream/
   ir.py                 # typed IR (Pydantic)
   expr.py               # safe row-expression evaluator
   passes.py             # validation + optimization
+  schema.py             # name resolution + type inference (the type checker)
   llm.py                # Anthropic frontend (NL -> IR)
   compiler.py           # phase driver + on-disk cache
   cli.py                # compile / run / explain
+  eval.py               # result-based eval harness (python -m pipedream.eval)
   runtime/
     executor.py         # Executor ABC + registry
     pandas_executor.py  # default in-memory backend
@@ -246,5 +307,6 @@ examples/
   orders.pipe           # natural-language source
   orders.ir.json        # pre-compiled IR (runs offline)
   data/orders.csv
+evals/cases/            # eval fixtures (prompt, golden IR, data, expected)
 tests/
 ```

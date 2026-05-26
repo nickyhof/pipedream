@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import passes
+from . import passes, schema
 from .compiler import Compiler, load_pipeline, save_pipeline
 from .errors import PipeDreamError
 from .ir import (
@@ -68,7 +68,19 @@ def render_plan(pipeline: Pipeline) -> str:
         marker = " *" if step.id == pipeline.output_id() else "  "
         lines.append(f"{marker}{i:>2}. {step.id}: {_describe(step)}")
     lines.append(f"output: {pipeline.output_id()}")
+    out_schema = _safe_output_schema(pipeline)
+    if out_schema is not None and out_schema.known:
+        cols = ", ".join(f"{c.name}:{c.dtype}" for c in out_schema.columns)
+        lines.append(f"schema: {cols}")
     return "\n".join(lines)
+
+
+def _safe_output_schema(pipeline: Pipeline):
+    """Inferred output schema, or None if it can't be determined."""
+    try:
+        return schema.infer_schemas(pipeline).get(pipeline.output_id())
+    except Exception:  # noqa: BLE001 - explain should never hard-fail on schema
+        return None
 
 
 def cmd_compile(args: argparse.Namespace) -> int:

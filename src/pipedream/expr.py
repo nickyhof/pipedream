@@ -121,6 +121,31 @@ def compile_expr(source: str) -> Expression:
     return Expression(source)
 
 
+def column_names(tree: ast.AST) -> set[str]:
+    """Collect the column references in an expression AST.
+
+    Descends into call arguments but not the called function's name, so
+    ``lower(status)`` yields ``{"status"}`` (not ``"lower"``). Used by schema
+    analysis to check that referenced columns exist upstream.
+    """
+    out: set[str] = set()
+
+    def rec(node: ast.AST) -> None:
+        if isinstance(node, ast.Call):
+            for arg in node.args:
+                rec(arg)
+            return
+        if isinstance(node, ast.Name):
+            if node.id not in _CONSTANTS:
+                out.add(node.id)
+            return
+        for child in ast.iter_child_nodes(node):
+            rec(child)
+
+    rec(tree)
+    return out
+
+
 def _validate(node: ast.AST, source: str) -> None:
     """Reject any node type outside the allowlist before evaluation."""
     for child in ast.walk(node):

@@ -1,0 +1,5 @@
+{
+  "description": "Total revenue per month across completed orders, ranked high to low.",
+  "ordered": true,
+  "executor": "pandas"
+}

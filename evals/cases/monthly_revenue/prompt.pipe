@@ -1,0 +1,4 @@
+Load the orders from data/orders.csv.
+Keep only the completed orders.
+Compute total revenue per month, counting how many orders contributed.
+Sort the months from highest revenue to lowest.

@@ -1,0 +1,12 @@
+{
+  "name": "top_doubled_orders",
+  "steps": [
+    {"op": "load_csv", "id": "orders", "path": "data/orders.csv"},
+    {"op": "filter", "id": "completed", "input": "orders", "predicate": "status == 'completed'"},
+    {"op": "derive", "id": "doubled", "input": "completed", "column": "double_amount", "expr": "amount * 2"},
+    {"op": "select", "id": "cols", "input": "doubled", "columns": ["customer", "month", "double_amount"]},
+    {"op": "sort", "id": "ranked", "input": "cols", "by": ["double_amount"], "descending": true},
+    {"op": "limit", "id": "top", "input": "ranked", "count": 3}
+  ],
+  "output": "top"
+}
