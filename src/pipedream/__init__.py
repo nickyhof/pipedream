@@ -2,7 +2,7 @@
 
 Author a pipeline in plain English; the compiler frontend (Claude) turns it into
 a typed, executor-agnostic IR, deterministic passes validate and optimize it,
-and a pluggable runtime executes it (in-memory pandas by default).
+and the runtime lowers it to SQL and executes it on DuckDB.
 """
 
 from __future__ import annotations

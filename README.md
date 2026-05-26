@@ -4,14 +4,14 @@ An LLM-based **compiler and runtime** for data pipelines authored in plain Engli
 
 You describe what you want in natural language; PipeDream compiles it — using
 Claude — into a typed, executor-agnostic intermediate representation (IR),
-validates and optimizes that IR with deterministic passes, and runs it on a
-pluggable runtime (in-memory pandas by default).
+validates and optimizes that IR with deterministic passes, and runs it by
+lowering it to SQL on DuckDB.
 
 ```
   orders.pipe                  Pipeline (IR)                result
  ┌────────────┐  frontend   ┌───────────────┐  passes   ┌──────────┐  executor
  │ plain      │ ──(Claude)─▶│ typed DAG of  │ ─────────▶│ validated│ ─────────▶ table
- │ English    │             │ steps         │  analyze  │ + pruned │ (pandas/duckdb)
+ │ English    │             │ steps         │  analyze  │ + pruned │ (DuckDB SQL)
  └────────────┘             └───────────────┘           └──────────┘
                                    │                                   ▲
                                    └────── on-disk cache ──────────────┘
@@ -44,7 +44,9 @@ Requires Python 3.11+.
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .            # add ".[dev]" for the test dependencies
+pip install -e .            # add ".[dev]" for tests
+                            # ".[serve]" for the local model server (FastAPI)
+                            # ".[local-model]" to load a Hugging Face model (torch)
 ```
 
 Compiling natural language requires an Anthropic API key:
@@ -88,8 +90,8 @@ Example output:
 
 | Command | Purpose |
 | --- | --- |
-| `pipedream compile <src.pipe> [-o out.json] [--no-cache]` | Compile source to IR; prints JSON or writes to `-o`. |
-| `pipedream run <src.pipe\|ir.json> [--executor NAME] [--limit N] [-o out.csv]` | Execute and print (or write CSV). |
+| `pipedream compile <src.pipe> [-o out.json] [--no-cache] [--max-repairs N]` | Compile source to IR; prints JSON or writes to `-o`. |
+| `pipedream run <src.pipe\|ir.json> [--limit N] [-o out.csv]` | Execute on DuckDB and print (or write CSV). |
 | `pipedream explain <src.pipe\|ir.json>` | Print the execution plan in dependency order. |
 
 Global `--model` overrides the Claude model (default `claude-opus-4-7`).
@@ -117,8 +119,9 @@ Sort the months from highest revenue to lowest.
 | Middle-end | `passes.py` | Pure functions over the IR: reference resolution, duplicate-id and cycle detection, expression compilation, and dead-step elimination. |
 | Schema analysis | `schema.py` | The type checker. Propagates a column schema (names + coarse dtypes) through the DAG and rejects unknown columns, bad/colliding join keys, and non-numeric aggregations at compile time. Sources resolve via a `SchemaProvider` (default reads CSV headers and inline JSON); unresolved sources relax downstream checks. |
 | Expressions | `expr.py` | A safe, AST-walking evaluator for filter predicates and derived columns. Allowlists node types and a fixed function set — never `eval`. |
-| Runtime | `runtime/` | An `Executor` ABC + registry with two built-in backends. `PandasExecutor` (default) walks the DAG in memory and evaluates row expressions through `expr.py`. `DuckDBExecutor` lowers the whole pipeline to SQL. |
-| Driver | `compiler.py` | Orchestrates the phases and caches compiled IR on disk, keyed by a hash of `(schema version, model, instruction prompt, source)`. |
+| Runtime | `runtime/` | An `Executor` ABC + registry. `DuckDBExecutor` lowers the whole validated pipeline to SQL and runs it on DuckDB; row expressions are translated from `expr.py`'s AST into SQL. The `classify` op runs as a DuckDB Python UDF. |
+| Driver | `compiler.py` | Orchestrates the phases and caches compiled IR on disk, keyed by a hash of `(schema version, model, instruction prompt, source)`. Runs a bounded **compile-and-repair loop**: if generated IR fails validation, the middle-end's error is fed back to the frontend to fix (`--max-repairs`, default 2). |
+| Runtime models | `runtime/model.py`, `serve.py` | The *local* model a pipeline calls during execution (for the `classify` op) — separate from the Anthropic compiler frontend. A pluggable `RuntimeModel` registry with an OpenAI-compatible client, plus a shipped local server. |
 
 ### The IR
 
@@ -138,6 +141,7 @@ order. Operations:
 | `sort` | `input`, `by`, `descending` |
 | `limit` | `input`, `count` |
 | `rename` | `input`, `renames` (`{source, target}`) |
+| `classify` | `input`, `template` (`{column}` placeholders), `labels`, `column` — labels each row with a runtime LLM |
 
 Aggregation functions: `sum`, `mean`, `min`, `max`, `count`, `median`, `std`,
 `first`, `last`, `nunique`. For a plain row count use `func="count"` with
@@ -197,25 +201,22 @@ rejected, to avoid false positives that would block valid pipelines. Names +
 types here lay the groundwork for a future compile-and-repair loop (feed these
 errors back to the model to fix).
 
-### Pluggable executors
+### Execution: DuckDB
 
-Two backends ship today, selected with `--executor` (or `get_executor(name)`):
+The runtime **lowers the IR to SQL** and runs it on DuckDB. Each step becomes a
+temporary view defined in dependency order, and row expressions are translated
+from the same validated AST (`expr.py`) into SQL rather than evaluated in Python.
+Deterministic ops (filter/derive/aggregate/join/...) are pure SQL; the one
+model-driven op, `classify`, runs as a vectorized DuckDB Python UDF (see below).
+Results are returned as **Arrow tables** (`pyarrow.Table`) — DuckDB is
+Arrow-native (zero-copy, and more type-faithful than the pandas path), so Arrow
+is the single in-memory representation end to end, with no pandas dependency.
+The CLI, eval harness, and library callers consume Arrow directly (`table.py`
+holds the few presentation/IO helpers).
 
-| Backend | How it runs the IR |
-| --- | --- |
-| `pandas` (default) | Walks the DAG in memory, memoizing shared upstream steps, and evaluates row expressions row-by-row via the safe evaluator. Good for a fast, dependency-light run. |
-| `duckdb` | **Lowers the IR to SQL**: each step becomes a temporary view defined in dependency order, and row expressions are translated from the same validated AST into SQL. Pushes work into DuckDB's engine. |
-
-Both produce identical results — the parity tests run the same pipeline through
-each and compare. That equivalence is the point of an executor-agnostic IR: the
-`duckdb` backend reuses the exact expression grammar the `pandas` backend does
-(`expr.py` exposes its parsed AST), translating it instead of evaluating it.
-
-```bash
-pipedream run examples/orders.ir.json --executor duckdb
-```
-
-Backends register themselves under a name and implement a single `run` method:
+The executor sits behind a registry, so another backend (a SQL warehouse, Spark)
+can be added without touching the compiler or the IR — it only implements `run`,
+and may assume the pipeline already passed semantic analysis:
 
 ```python
 from pipedream.runtime import register, Executor
@@ -225,14 +226,8 @@ class MyExecutor(Executor):
     def run(self, pipeline):
         ...  # pipeline is already validated
 
-register("my_backend", MyExecutor)
+register("my_backend", MyExecutor)  # then get_executor("my_backend")
 ```
-
-Then `pipedream run ... --executor my_backend`, or `get_executor("my_backend")`
-in code. By the time `run` is called the pipeline has passed semantic analysis,
-so an executor may assume references resolve and the graph is acyclic. The IR is
-intentionally engine-agnostic so the same expression grammar can be evaluated
-row-wise (pandas) or lowered to SQL (a future warehouse backend).
 
 ### Compile cache
 
@@ -247,12 +242,47 @@ alongside the IR. Use `--no-cache` to force recompilation.
 from pipedream import Compiler, get_executor
 
 pipeline = Compiler().compile_file("examples/orders.pipe")  # needs ANTHROPIC_API_KEY
-df = get_executor("pandas").run(pipeline)
+table = get_executor().run(pipeline)        # a pyarrow.Table
 
 # Or load a pre-compiled IR — no key required:
 from pipedream import load_pipeline
-df = get_executor("pandas").run(load_pipeline("examples/orders.ir.json"))
+table = get_executor().run(load_pipeline("examples/orders.ir.json"))
+rows = table.to_pylist()                    # -> list[dict]
 ```
+
+### Runtime LLM ops and the local model server
+
+Two model uses, kept separate:
+
+- **Compile time** — the frontend turns natural language into IR using **Anthropic** (cloud). Unchanged.
+- **Run time** — the `classify` op calls a **local** model per row to label free text the IR couldn't classify deterministically (sentiment, topic, …). The pipeline's intent — the rendered template and the allowed `labels` — is sent in the prompt, so a stock instruct model behaves as a pipeline-aware classifier ("IR-awareness" comes from *what we send*, not a model trained on the IR).
+
+Runtime models are pluggable like executors (`runtime/model.py`). The default `OpenAIEndpointModel` speaks the OpenAI chat API, configured by env:
+
+```
+PIPEDREAM_LLM_BASE_URL   default http://localhost:8000/v1
+PIPEDREAM_LLM_MODEL      default "local"
+PIPEDREAM_LLM_API_KEY    optional
+```
+
+It works against any OpenAI-compatible server. PipeDream also **ships its own** (`pipedream.serve`): a small FastAPI app that loads a local Hugging Face model and exposes `/v1/chat/completions`. The heavy ML stack is an optional extra, imported lazily:
+
+```bash
+pip install -e ".[serve,local-model]"
+pipedream-serve --model Qwen/Qwen2.5-0.5B-Instruct --port 8000   # terminal 1
+
+export PIPEDREAM_LLM_BASE_URL=http://localhost:8000/v1
+export PIPEDREAM_LLM_MODEL=Qwen/Qwen2.5-0.5B-Instruct
+pipedream run examples/reviews.ir.json                            # terminal 2
+```
+
+`classify` runs inside DuckDB as a **vectorized (Arrow) Python UDF** — a per-step
+function bound to that step's labels and the runtime model. DuckDB hands it a
+chunk of rows at a time, and it fans the model calls across a thread pool
+(`PIPEDREAM_LLM_CONCURRENCY`, default 8) and returns the labels as an Arrow array,
+so its output is just another view that downstream SQL steps consume. The
+`classify` example (`examples/reviews.*`) needs a running model server;
+`pipedream explain examples/reviews.ir.json` works offline.
 
 ## Evaluation
 
@@ -283,9 +313,11 @@ pytest
 ```
 
 The suite covers the expression evaluator (including rejection of unsafe
-constructs), the analysis and schema passes, every executor op (pandas and
-duckdb, with parity checks), compiler caching (via a stub frontend, so no
-network), the CLI, and the eval cases — all offline.
+constructs), the analysis and schema passes, every DuckDB executor op (including
+`classify` via a stub runtime model and its composition with downstream SQL), the
+compile-and-repair loop, the local model server (in-process via a fake
+generator), compiler caching (via a stub frontend, so no network), the CLI, and
+the eval cases — all offline.
 
 ## Project layout
 
@@ -296,17 +328,21 @@ src/pipedream/
   passes.py             # validation + optimization
   schema.py             # name resolution + type inference (the type checker)
   llm.py                # Anthropic frontend (NL -> IR)
+  templating.py         # {column} templating for LLM ops
   compiler.py           # phase driver + on-disk cache
   cli.py                # compile / run / explain
+  table.py              # Arrow table helpers (render / CSV IO) — the result type
   eval.py               # result-based eval harness (python -m pipedream.eval)
+  serve.py              # local OpenAI-compatible model server (pipedream-serve)
   runtime/
     executor.py         # Executor ABC + registry
-    pandas_executor.py  # default in-memory backend
-    duckdb_executor.py  # SQL-lowering backend
+    duckdb_executor.py  # SQL-lowering backend (the engine); classify via UDF
+    model.py            # RuntimeModel registry + OpenAI-compatible client
 examples/
   orders.pipe           # natural-language source
   orders.ir.json        # pre-compiled IR (runs offline)
-  data/orders.csv
+  reviews.ir.json       # classify example (needs a local model server)
+  data/
 evals/cases/            # eval fixtures (prompt, golden IR, data, expected)
 tests/
 ```

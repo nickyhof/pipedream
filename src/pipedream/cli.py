@@ -6,11 +6,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import passes, schema
+from . import passes, schema, table
 from .compiler import Compiler, load_pipeline, save_pipeline
 from .errors import PipeDreamError
 from .ir import (
     Aggregate,
+    Classify,
     Derive,
     Filter,
     Join,
@@ -24,7 +25,7 @@ from .ir import (
     Step,
 )
 from .llm import DEFAULT_MODEL
-from .runtime import available, get_executor
+from .runtime import get_executor
 
 
 def _load_or_compile(path: str, model: str, use_cache: bool) -> Pipeline:
@@ -59,6 +60,8 @@ def _describe(step: Step) -> str:
     if isinstance(step, Rename):
         pairs = ", ".join(f"{r.source}->{r.target}" for r in step.renames)
         return f"rename in {step.input}: {pairs}"
+    if isinstance(step, Classify):
+        return f"classify {step.input} -> {step.column} in [{', '.join(step.labels)}] (LLM)"
     return step.op
 
 
@@ -84,7 +87,7 @@ def _safe_output_schema(pipeline: Pipeline):
 
 
 def cmd_compile(args: argparse.Namespace) -> int:
-    pipeline = Compiler(model=args.model).compile_file(
+    pipeline = Compiler(model=args.model, max_repairs=args.max_repairs).compile_file(
         args.source, use_cache=not args.no_cache
     )
     if args.out:
@@ -103,15 +106,14 @@ def cmd_explain(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     pipeline = _load_or_compile(args.input, args.model, not args.no_cache)
-    executor = get_executor(args.executor)
-    result = executor.run(pipeline)
+    result = get_executor().run(pipeline)
     if args.limit is not None:
-        result = result.head(args.limit)
+        result = table.head(result, args.limit)
     if args.out:
-        result.to_csv(args.out, index=False)
-        print(f"wrote {len(result)} rows -> {args.out}")
+        table.write_csv(result, args.out)
+        print(f"wrote {result.num_rows} rows -> {args.out}")
     else:
-        print(result.to_string(index=False))
+        print(table.render(result))
     return 0
 
 
@@ -127,6 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_compile.add_argument("source", help="Path to a .pipe (natural-language) file.")
     p_compile.add_argument("-o", "--out", help="Write IR JSON to this path.")
     p_compile.add_argument("--no-cache", action="store_true", help="Bypass the compile cache.")
+    p_compile.add_argument(
+        "--max-repairs",
+        type=int,
+        default=2,
+        help="Times the model may retry to fix a pipeline that fails validation.",
+    )
     p_compile.set_defaults(func=cmd_compile)
 
     p_explain = sub.add_parser("explain", help="Show the execution plan for a pipeline.")
@@ -136,11 +144,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="Execute a pipeline and print the result.")
     p_run.add_argument("input", help="A .pipe source file or a .json IR file.")
-    p_run.add_argument(
-        "--executor",
-        default="pandas",
-        help=f"Runtime backend (available: {', '.join(available())}).",
-    )
     p_run.add_argument("--limit", type=int, help="Only print the first N rows.")
     p_run.add_argument("-o", "--out", help="Write the result to this CSV path.")
     p_run.add_argument("--no-cache", action="store_true")
@@ -161,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: file not found: {exc.filename}", file=sys.stderr)
         return 1
     except KeyError as exc:
-        # e.g. an unknown executor name from the registry.
+        # e.g. a missing key from one of the registries.
         print(f"error: {exc.args[0] if exc.args else exc}", file=sys.stderr)
         return 1
 

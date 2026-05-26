@@ -33,9 +33,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-import pandas as pd
+import pyarrow as pa
 
-from . import passes
+from . import passes, table
 from .compiler import Compiler, load_pipeline
 from .errors import PipeDreamError
 from .runtime import get_executor
@@ -82,7 +82,7 @@ def load_cases(root: str | Path = DEFAULT_CASES_DIR) -> list[Case]:
                 path=case_dir,
                 description=manifest.get("description", ""),
                 ordered=bool(manifest.get("ordered", False)),
-                executor=manifest.get("executor", "pandas"),
+                executor=manifest.get("executor", "duckdb"),
             )
         )
     return cases
@@ -108,7 +108,7 @@ def run_case(case: Case, live: bool = False, compiler: Compiler | None = None) -
             else:
                 pipeline = passes.analyze(load_pipeline("golden.ir.json"))
             actual = get_executor(case.executor).run(pipeline)
-            expected = pd.read_csv("expected.csv")
+            expected = table.read_csv("expected.csv")
     except PipeDreamError as exc:
         return Result(case.name, False, f"error: {exc}")
     except Exception as exc:  # noqa: BLE001 - surface anything else as a failure
@@ -118,16 +118,15 @@ def run_case(case: Case, live: bool = False, compiler: Compiler | None = None) -
     return Result(case.name, ok, detail)
 
 
-def compare(expected: pd.DataFrame, actual: pd.DataFrame, ordered: bool) -> tuple[bool, str]:
-    if set(expected.columns) != set(actual.columns):
+def compare(expected: pa.Table, actual: pa.Table, ordered: bool) -> tuple[bool, str]:
+    exp_cols, act_cols = expected.column_names, actual.column_names
+    if set(exp_cols) != set(act_cols):
         return (
             False,
-            f"columns differ: expected {sorted(expected.columns)}, "
-            f"got {sorted(actual.columns)}",
+            f"columns differ: expected {sorted(exp_cols)}, got {sorted(act_cols)}",
         )
-    cols = list(expected.columns)
-    exp_rows = _rows(expected, cols)
-    act_rows = _rows(actual, cols)
+    exp_rows = _rows(expected, exp_cols)
+    act_rows = _rows(actual, exp_cols)
     if not ordered:
         key = lambda r: tuple(str(x) for x in r)  # noqa: E731
         exp_rows, act_rows = sorted(exp_rows, key=key), sorted(act_rows, key=key)
@@ -136,8 +135,8 @@ def compare(expected: pd.DataFrame, actual: pd.DataFrame, ordered: bool) -> tupl
     return False, f"expected {exp_rows} but got {act_rows}"
 
 
-def _rows(df: pd.DataFrame, columns: list[str]) -> list[tuple]:
-    return [tuple(_canon(rec[c]) for c in columns) for rec in df[columns].to_dict("records")]
+def _rows(t: pa.Table, columns: list[str]) -> list[tuple]:
+    return [tuple(_canon(rec[c]) for c in columns) for rec in t.to_pylist()]
 
 
 def _canon(value: Any) -> Any:
@@ -149,17 +148,6 @@ def _canon(value: Any) -> Any:
         return None if math.isnan(value) else round(float(value), 6)
     if isinstance(value, int):
         return int(value)
-    try:  # normalize numpy scalars
-        import numpy as np
-
-        if isinstance(value, np.bool_):
-            return bool(value)
-        if isinstance(value, np.integer):
-            return int(value)
-        if isinstance(value, np.floating):
-            return round(float(value), 6)
-    except Exception:  # noqa: BLE001
-        pass
     return value
 
 

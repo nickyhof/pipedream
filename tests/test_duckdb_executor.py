@@ -30,14 +30,8 @@ def duck(pipeline):
     return get_executor("duckdb").run(passes.analyze(pipeline))
 
 
-def _norm(df):
-    """Order-insensitive, rounding-tolerant view of a result for comparison."""
-    rows = []
-    for rec in df.to_dict("records"):
-        rows.append(
-            tuple(round(v, 6) if isinstance(v, float) else v for v in rec.values())
-        )
-    return sorted(rows, key=lambda r: tuple(str(x) for x in r))
+def col(table, name):
+    return table.column(name).to_pylist()
 
 
 def test_filter_select_sort_limit():
@@ -52,9 +46,9 @@ def test_filter_select_sort_limit():
         ],
         output="top",
     )
-    df = duck(p)
-    assert list(df["customer"]) == ["carol", "alice"]
-    assert list(df["amount"]) == [300.0, 120.5]
+    t = duck(p)
+    assert col(t, "customer") == ["carol", "alice"]
+    assert col(t, "amount") == [300.0, 120.5]
 
 
 def test_derive():
@@ -66,9 +60,9 @@ def test_derive():
         ],
         output="net",
     )
-    df = duck(p)
-    by_customer = df[(df["customer"] == "alice") & (df["month"] == "2026-01")]
-    assert by_customer["net"].iloc[0] == 108.45
+    rows = duck(p).to_pylist()
+    match = [r for r in rows if r["customer"] == "alice" and r["month"] == "2026-01"]
+    assert match[0]["net"] == 108.45
 
 
 def test_aggregate_grouped():
@@ -89,10 +83,10 @@ def test_aggregate_grouped():
         ],
         output="bymonth",
     )
-    df = duck(p).sort_values("month").reset_index(drop=True)
-    assert list(df["month"]) == ["2026-01", "2026-02"]
-    assert list(df["revenue"]) == [200.5, 300.0]
-    assert list(df["n"]) == [2, 1]
+    rows = sorted(duck(p).to_pylist(), key=lambda r: r["month"])
+    assert [r["month"] for r in rows] == ["2026-01", "2026-02"]
+    assert [r["revenue"] for r in rows] == [200.5, 300.0]
+    assert [r["n"] for r in rows] == [2, 1]
 
 
 def test_aggregate_whole_table():
@@ -112,10 +106,10 @@ def test_aggregate_whole_table():
         ],
         output="total",
     )
-    df = duck(p)
-    assert len(df) == 1
-    assert df.loc[0, "total_amount"] == 700.5
-    assert df.loc[0, "customers"] == 3
+    rows = duck(p).to_pylist()
+    assert len(rows) == 1
+    assert rows[0]["total_amount"] == 700.5
+    assert rows[0]["customers"] == 3
 
 
 def test_join():
@@ -130,9 +124,10 @@ def test_join():
         ],
         output="j",
     )
-    df = duck(p).sort_values("id").reset_index(drop=True)
-    assert set(df.columns) == {"id", "name", "score"}
-    assert list(df["score"]) == [10, 20]
+    t = duck(p)
+    rows = sorted(t.to_pylist(), key=lambda r: r["id"])
+    assert set(t.column_names) == {"id", "name", "score"}
+    assert [r["score"] for r in rows] == [10, 20]
 
 
 @pytest.mark.parametrize(
@@ -152,47 +147,12 @@ def test_expression_translation(predicate, expected):
         ],
         output="f",
     )
-    df = duck(p)
-    assert set(df["customer"]) == expected
+    assert set(col(duck(p), "customer")) == expected
 
 
 def test_example_ir_end_to_end():
     pipeline = load_pipeline("examples/orders.ir.json")
-    df = duck(pipeline)
-    assert list(df["month"]) == ["2026-02", "2026-03", "2026-01"]
-    assert list(df["order_count"]) == [3, 3, 2]
-    assert df.loc[0, "revenue"] == 495.25
-
-
-def test_parity_with_pandas_on_example():
-    pipeline = passes.analyze(load_pipeline("examples/orders.ir.json"))
-    pandas_df = get_executor("pandas").run(pipeline)
-    duck_df = get_executor("duckdb").run(pipeline)
-    # Sort is deterministic here, so compare row-for-row after column align.
-    assert list(pandas_df.columns) == list(duck_df.columns)
-    assert _norm(pandas_df) == _norm(duck_df)
-
-
-def test_parity_with_pandas_on_aggregation():
-    pipeline = Pipeline(
-        name="parity",
-        steps=[
-            LoadInline(id="src", data_json=ORDERS),
-            Filter(id="done", input="src", predicate="status == 'completed'"),
-            Aggregate(
-                id="agg",
-                input="done",
-                group_by=["month"],
-                aggregations=[
-                    Aggregation(column="amount", func="sum", output="revenue"),
-                    Aggregation(column="amount", func="mean", output="avg_amount"),
-                    Aggregation(column="", func="count", output="n"),
-                ],
-            ),
-        ],
-        output="agg",
-    )
-    analyzed = passes.analyze(pipeline)
-    assert _norm(get_executor("pandas").run(analyzed)) == _norm(
-        get_executor("duckdb").run(analyzed)
-    )
+    t = duck(pipeline)
+    assert col(t, "month") == ["2026-02", "2026-03", "2026-01"]
+    assert col(t, "order_count") == [3, 3, 2]
+    assert t.to_pylist()[0]["revenue"] == 495.25

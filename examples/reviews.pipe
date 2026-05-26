@@ -1,0 +1,3 @@
+Load the customer reviews from examples/data/reviews.csv.
+Classify each review's sentiment as positive, negative, or neutral.
+Keep the id, review, and sentiment columns.

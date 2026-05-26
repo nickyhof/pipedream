@@ -28,6 +28,7 @@ from .errors import CompileError
 from .expr import column_names, compile_expr
 from .ir import (
     Aggregate,
+    Classify,
     Derive,
     Filter,
     Join,
@@ -40,6 +41,7 @@ from .ir import (
     Sort,
     Step,
 )
+from .templating import placeholders
 
 # Coarse dtypes. "unknown" means "could not determine"; checks relax on it.
 DType = str
@@ -109,17 +111,24 @@ class FileSchemaProvider:
         if not step.has_header:
             return Schema.unknown()
         try:
-            import pandas as pd
+            import pyarrow.csv as pacsv
 
-            sample = pd.read_csv(step.path, nrows=200)
+            arrow_schema = pacsv.open_csv(step.path).schema
         except Exception:  # noqa: BLE001 - missing/unreadable file -> relax
             return Schema.unknown()
-        return Schema.of([(str(c), _pandas_dtype(sample[c].dtype)) for c in sample.columns])
+        return Schema.of([(f.name, _arrow_dtype(f.type)) for f in arrow_schema])
 
 
-def _pandas_dtype(dtype: Any) -> DType:
-    kind = getattr(dtype, "kind", "O")
-    return {"i": INT, "u": INT, "f": FLOAT, "b": BOOL}.get(kind, STR)
+def _arrow_dtype(dtype: Any) -> DType:
+    import pyarrow as pa
+
+    if pa.types.is_integer(dtype):
+        return INT
+    if pa.types.is_floating(dtype):
+        return FLOAT
+    if pa.types.is_boolean(dtype):
+        return BOOL
+    return STR
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +178,8 @@ def _infer_step(
         return schemas[step.input]
     if isinstance(step, Rename):
         return _rename_schema(step, schemas[step.input])
+    if isinstance(step, Classify):
+        return _classify_schema(step, schemas[step.input])
     return Schema.unknown()
 
 
@@ -334,6 +345,24 @@ def _rename_schema(step: Rename, src: Schema) -> Schema:
     renamed = [Column(mapping.get(c.name, c.name), c.dtype) for c in src.columns]
     _check_duplicate_names(step, [c.name for c in renamed])
     return Schema(tuple(renamed))
+
+
+def _classify_schema(step: Classify, src: Schema) -> Schema:
+    _require_columns(step, src, placeholders(step.template))
+    if not step.labels:
+        raise CompileError(f"step {step.id!r} (classify) must define at least one label")
+    if not src.known:
+        return Schema.unknown()
+    cols = [c for c in src.columns if c.name != step.column]
+    cols.append(Column(step.column, STR))
+    if src.has(step.column):
+        return Schema(
+            tuple(
+                Column(step.column, STR) if c.name == step.column else c
+                for c in src.columns
+            )
+        )
+    return Schema(tuple(cols))
 
 
 def _check_duplicate_names(step: Step, names: list[str]) -> None:

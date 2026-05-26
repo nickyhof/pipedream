@@ -1,5 +1,5 @@
 {
   "description": "Top 2 customers by total spend across completed orders.",
   "ordered": true,
-  "executor": "pandas"
+  "executor": "duckdb"
 }

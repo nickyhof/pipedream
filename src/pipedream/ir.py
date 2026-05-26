@@ -4,8 +4,8 @@ A compiled pipeline is a directed acyclic graph of typed steps. Each step has a
 unique ``id`` and an ``op`` discriminator; steps reference the output of earlier
 steps by id. The IR is deliberately executor-agnostic: it describes *what*
 transformation to apply, never *how* a particular engine should run it. That
-separation is what lets the same IR run on the in-memory pandas executor today
-and on a warehouse/Spark executor later.
+separation is what lets the same IR run on DuckDB today and on a warehouse/Spark
+executor later.
 
 The IR is also the compiler's contract with the model. The JSON schema derived
 from these models is what the LLM frontend is constrained to emit, so the field
@@ -145,6 +145,25 @@ class Rename(BaseModel):
     renames: list[RenameItem]
 
 
+class Classify(BaseModel):
+    """Label each row using a runtime LLM.
+
+    The ``template`` is filled per row (``{column}`` placeholders) and sent to a
+    runtime model, which must answer with one of ``labels``. This is the one op
+    that calls a model at execution time; the compiler frontend (which turns
+    natural language into this IR) is unaffected.
+    """
+
+    op: Literal["classify"] = "classify"
+    id: str
+    input: str
+    template: str = Field(
+        description="Per-row prompt with {column} placeholders, e.g. 'Review: {text}'."
+    )
+    labels: list[str] = Field(description="The allowed output labels.")
+    column: str = Field(description="Name of the resulting label column.")
+
+
 Step = Annotated[
     Union[
         LoadCsv,
@@ -157,6 +176,7 @@ Step = Annotated[
         Sort,
         Limit,
         Rename,
+        Classify,
     ],
     Field(discriminator="op"),
 ]
