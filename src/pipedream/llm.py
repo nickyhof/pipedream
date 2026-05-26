@@ -62,11 +62,36 @@ Set the pipeline `output` to the id of the step that produces the final result \
 (usually the last transformation). Choose a concise `name` for the pipeline.
 """
 
+# Sent (as a user turn, atop the cached system prompt) when a generated pipeline
+# fails validation, to get a corrected one. The middle-end's error message is the
+# signal the model repairs against.
+REPAIR_TEMPLATE = """\
+A previous attempt to compile the request below produced a pipeline that failed \
+validation. Fix it.
+
+Original request:
+{source}
+
+Pipeline that failed validation (JSON):
+{previous}
+
+Validation error:
+{error}
+
+Return a corrected pipeline that resolves this error while still satisfying the \
+original request. Change only what is necessary to fix the error."""
+
 
 class Frontend(Protocol):
-    """Anything that can turn pipeline source text into an IR."""
+    """Anything that can turn pipeline source text into an IR.
+
+    ``repair`` is optional; a frontend that omits it simply can't participate in
+    the compiler's repair loop (the compiler degrades to a single attempt).
+    """
 
     def compile_source(self, source: str) -> Pipeline: ...
+
+    def repair(self, source: str, previous: str, error: str) -> Pipeline: ...
 
 
 class AnthropicFrontend:
@@ -77,6 +102,14 @@ class AnthropicFrontend:
         self._api_key = api_key
 
     def compile_source(self, source: str) -> Pipeline:
+        return self._parse(source)
+
+    def repair(self, source: str, previous: str, error: str) -> Pipeline:
+        return self._parse(
+            REPAIR_TEMPLATE.format(source=source, previous=previous, error=error)
+        )
+
+    def _parse(self, user_content: str) -> Pipeline:
         try:
             import anthropic
         except ImportError as exc:  # pragma: no cover - dependency is declared
@@ -108,7 +141,7 @@ class AnthropicFrontend:
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],
-                messages=[{"role": "user", "content": source}],
+                messages=[{"role": "user", "content": user_content}],
                 output_format=Pipeline,
             )
         except Exception as exc:  # noqa: BLE001 - transport/validation failures

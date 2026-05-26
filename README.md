@@ -120,7 +120,7 @@ Sort the months from highest revenue to lowest.
 | Schema analysis | `schema.py` | The type checker. Propagates a column schema (names + coarse dtypes) through the DAG and rejects unknown columns, bad/colliding join keys, and non-numeric aggregations at compile time. Sources resolve via a `SchemaProvider` (default reads CSV headers and inline JSON); unresolved sources relax downstream checks. |
 | Expressions | `expr.py` | A safe, AST-walking evaluator for filter predicates and derived columns. Allowlists node types and a fixed function set — never `eval`. |
 | Runtime | `runtime/` | An `Executor` ABC + registry with two built-in backends. `PandasExecutor` (default) walks the DAG in memory and evaluates row expressions through `expr.py`. `DuckDBExecutor` lowers the whole pipeline to SQL. |
-| Driver | `compiler.py` | Orchestrates the phases and caches compiled IR on disk, keyed by a hash of `(schema version, model, instruction prompt, source)`. |
+| Driver | `compiler.py` | Orchestrates the phases and caches compiled IR on disk, keyed by a hash of `(schema version, model, instruction prompt, source)`. Runs a bounded **compile-and-repair loop**: if generated IR fails validation, the middle-end's error is fed back to the frontend to fix (`--max-repairs`, default 2). |
 | Runtime models | `runtime/model.py`, `serve.py` | The *local* model a pipeline calls during execution (for the `classify` op) — separate from the Anthropic compiler frontend. A pluggable `RuntimeModel` registry with an OpenAI-compatible client, plus a shipped local server. |
 
 ### The IR

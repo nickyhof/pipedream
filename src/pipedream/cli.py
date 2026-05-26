@@ -87,7 +87,7 @@ def _safe_output_schema(pipeline: Pipeline):
 
 
 def cmd_compile(args: argparse.Namespace) -> int:
-    pipeline = Compiler(model=args.model).compile_file(
+    pipeline = Compiler(model=args.model, max_repairs=args.max_repairs).compile_file(
         args.source, use_cache=not args.no_cache
     )
     if args.out:
@@ -130,6 +130,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_compile.add_argument("source", help="Path to a .pipe (natural-language) file.")
     p_compile.add_argument("-o", "--out", help="Write IR JSON to this path.")
     p_compile.add_argument("--no-cache", action="store_true", help="Bypass the compile cache.")
+    p_compile.add_argument(
+        "--max-repairs",
+        type=int,
+        default=2,
+        help="Times the model may retry to fix a pipeline that fails validation.",
+    )
     p_compile.set_defaults(func=cmd_compile)
 
     p_explain = sub.add_parser("explain", help="Show the execution plan for a pipeline.")

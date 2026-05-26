@@ -56,10 +56,12 @@ class Compiler:
         frontend: Frontend | None = None,
         model: str = DEFAULT_MODEL,
         cache_dir: str | Path = CACHE_DIR,
+        max_repairs: int = 2,
     ) -> None:
         self.model = model
         self.frontend = frontend if frontend is not None else AnthropicFrontend(model)
         self.cache_dir = Path(cache_dir)
+        self.max_repairs = max_repairs
 
     def compile(self, source: str, use_cache: bool = True) -> Pipeline:
         """Compile source text into a validated, optimized pipeline."""
@@ -72,11 +74,33 @@ class Compiler:
                 return passes.analyze(pipeline)
 
         pipeline = self.frontend.compile_source(source)
-        analyzed = passes.analyze(pipeline)
+        analyzed = self._analyze_with_repair(source, pipeline)
 
         if use_cache:
             self._write_cache(cache_path, source, analyzed)
         return analyzed
+
+    def _analyze_with_repair(self, source: str, pipeline: Pipeline) -> Pipeline:
+        """Validate, and on failure ask the frontend to fix its own output.
+
+        The middle-end's :class:`CompileError` is fed back to the model so it can
+        correct semantic mistakes (unknown columns, bad join keys, ...) that
+        structured outputs can't prevent. Bounded by ``max_repairs``.
+        """
+        can_repair = hasattr(self.frontend, "repair")
+        error: CompileError | None = None
+        for attempt in range(self.max_repairs + 1):
+            try:
+                return passes.analyze(pipeline)
+            except CompileError as exc:
+                error = exc
+                if attempt >= self.max_repairs or not can_repair:
+                    break
+                pipeline = self.frontend.repair(
+                    source, pipeline.model_dump_json(indent=2), str(exc)
+                )
+        assert error is not None  # the loop only breaks after catching one
+        raise error
 
     def compile_file(self, path: str | Path, use_cache: bool = True) -> Pipeline:
         source = Path(path).read_text(encoding="utf-8")
