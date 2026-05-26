@@ -1,0 +1,12 @@
+{
+  "name": "top_customers_by_spend",
+  "steps": [
+    {"op": "load_csv", "id": "orders", "path": "data/orders.csv"},
+    {"op": "filter", "id": "completed", "input": "orders", "predicate": "status == 'completed'"},
+    {"op": "aggregate", "id": "by_customer", "input": "completed", "group_by": ["customer"],
+     "aggregations": [{"column": "amount", "func": "sum", "output": "total"}]},
+    {"op": "sort", "id": "ranked", "input": "by_customer", "by": ["total"], "descending": true},
+    {"op": "limit", "id": "top", "input": "ranked", "count": 2}
+  ],
+  "output": "top"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "revenue_by_region",
+  "steps": [
+    {"op": "load_csv", "id": "orders", "path": "data/orders.csv"},
+    {"op": "filter", "id": "completed", "input": "orders", "predicate": "status == 'completed'"},
+    {"op": "load_csv", "id": "regions", "path": "data/regions.csv"},
+    {"op": "join", "id": "with_region", "left": "completed", "right": "regions", "on": ["customer"], "how": "inner"},
+    {"op": "aggregate", "id": "by_region", "input": "with_region", "group_by": ["region"],
+     "aggregations": [{"column": "amount", "func": "sum", "output": "revenue"}]},
+    {"op": "sort", "id": "ranked", "input": "by_region", "by": ["revenue"], "descending": true}
+  ],
+  "output": "ranked"
+}

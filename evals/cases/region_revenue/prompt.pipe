@@ -1,0 +1,3 @@
+Load orders from data/orders.csv and the customer-to-region lookup from data/regions.csv.
+Keep only completed orders, then attach each order's region by matching on customer.
+Total the revenue per region, highest first.

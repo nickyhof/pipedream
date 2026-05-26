@@ -1,0 +1,5 @@
+{
+  "description": "Top 3 completed orders by a doubled-amount derived column.",
+  "ordered": true,
+  "executor": "pandas"
+}

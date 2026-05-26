@@ -126,11 +126,18 @@ def prune(pipeline: Pipeline) -> Pipeline:
     return Pipeline(name=pipeline.name, steps=pruned, output=pipeline.output)
 
 
-def analyze(pipeline: Pipeline) -> Pipeline:
-    """Run the full middle-end: validate, then prune unreachable work.
+def analyze(pipeline: Pipeline, schema_provider=None) -> Pipeline:
+    """Run the full middle-end: validate, prune, then schema-check.
 
     Validation runs first on the whole pipeline so that an error in a dead step
-    is still surfaced rather than silently dropped.
+    is still surfaced rather than silently dropped. Schema analysis runs on the
+    pruned pipeline (only the steps that actually execute). ``schema_provider``
+    overrides how source columns are resolved; the default reads CSV headers and
+    inline JSON, relaxing checks where a source can't be resolved.
     """
+    from . import schema  # local import avoids an import cycle
+
     validate(pipeline)
-    return prune(pipeline)
+    pruned = prune(pipeline)
+    schema.check_schema(pruned, schema_provider)
+    return pruned

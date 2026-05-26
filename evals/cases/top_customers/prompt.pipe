@@ -1,0 +1,4 @@
+Read data/orders.csv.
+Only consider completed orders.
+Total up how much each customer spent.
+Return the top 2 spenders, highest first.

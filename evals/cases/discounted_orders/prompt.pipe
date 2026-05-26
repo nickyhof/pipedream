@@ -1,0 +1,4 @@
+Load data/orders.csv and keep the completed orders.
+Add a column called double_amount equal to amount times two.
+Keep the customer, month, and double_amount columns.
+Show the three largest by double_amount, biggest first.
